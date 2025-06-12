@@ -25,6 +25,10 @@ NESSUS_SECRET_KEY = 'ee494cff95ea1303eb15482d60e7a8550d556aa174412f0efc3a5812d6b
 DEFECTDOJO_HOST = 'http://172.18.5.55:8080'
 DEFECTDOJO_API_KEY = '9686a135dc98c1a3310d67952ef52d3e47347dbc'
 
+PRODUCT_ID = 1  # Change this to your actual product ID
+ENGAGEMENT_TYPE = "CI/CD"  # Or 'Interactive', 'Checkup', etc.
+STATUS = "In Progress"
+
 HEADERS = {'Authorization': f'Token {DEFECTDOJO_API_KEY}'}
 
 # Connect to Nessus
@@ -35,17 +39,36 @@ except Exception as e:
     logging.error(f"Failed to connect to Nessus: {e}")
     sys.exit(1)
 
-def get_engagement_id_by_name(scan_name):
+def get_or_create_engagement(scan_name, scan_date):
+    engagement_name = f"{scan_name} - {scan_date}"
     try:
-        url = f"{DEFECTDOJO_HOST}/api/v2/engagements/?name={scan_name}"
-        response = requests.get(url, headers=HEADERS, verify=False)
+        response = requests.get(f"{DEFECTDOJO_HOST}/api/v2/engagements/?name={engagement_name}", headers=HEADERS, verify=False)
         if response.status_code == 200:
-            engagements = response.json().get('results', [])
-            if engagements:
-                return engagements[0]['id']
-        return None
+            results = response.json().get("results", [])
+            if results:
+                return results[0]["id"]
+
+        # Engagement not found, create one
+        start_end_date = scan_date
+        engagement_data = {
+            "name": engagement_name,
+            "product": PRODUCT_ID,
+            "target_start": start_end_date,
+            "target_end": start_end_date,
+            "engagement_type": ENGAGEMENT_TYPE,
+            "status": STATUS,
+            "active": True
+        }
+        create_resp = requests.post(f"{DEFECTDOJO_HOST}/api/v2/engagements/", headers=HEADERS, json=engagement_data, verify=False)
+        if create_resp.status_code == 201:
+            engagement_id = create_resp.json().get("id")
+            logging.info(f"🆕 Created new engagement '{engagement_name}' (ID: {engagement_id})")
+            return engagement_id
+        else:
+            logging.error(f"❌ Failed to create engagement: {create_resp.status_code} {create_resp.text}")
+            return None
     except Exception as e:
-        logging.error(f"Error fetching engagement ID: {e}")
+        logging.error(f"❌ Error creating/getting engagement: {e}")
         return None
 
 def scan_already_imported(scan_id):
@@ -63,14 +86,15 @@ def run_sync():
         for scan in scans:
             scan_id = scan.get('id')
             scan_name = scan.get('name', f"Scan-{scan_id}")
+            scan_date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
             if scan_already_imported(scan_id):
                 logging.info(f"⏭️ Scan ID {scan_id} already imported. Skipping.")
                 continue
 
-            engagement_id = get_engagement_id_by_name(scan_name)
+            engagement_id = get_or_create_engagement(scan_name, scan_date)
             if not engagement_id:
-                logging.warning(f"⚠️ No matching engagement for scan '{scan_name}'. Skipping.")
+                logging.warning(f"⚠️ Cannot continue without engagement for scan '{scan_name}'.")
                 continue
 
             logging.info(f"📥 Exporting scan ID {scan_id} ({scan_name})")
@@ -83,7 +107,6 @@ def run_sync():
                 continue
 
             try:
-                scan_date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
                 files = {'file': (f'scan_{scan_id}.nessus', scan_stream, 'application/xml')}
                 data = {
                     'scan_type': 'Tenable Scan',
